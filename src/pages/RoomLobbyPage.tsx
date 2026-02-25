@@ -1,81 +1,278 @@
-// src/pages/RoomLobbyPage.tsx
 import { Channel, Socket } from "phoenix";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { useAuth } from "../auth/useAuth";
-import type { ChatMessage } from "../types/chat";
+import { InviteModal } from "../components/InviteModal";
+import type { InviteIncoming, LobbyUserId } from "../realtime/lobby";
+import { LobbyClient } from "../realtime/lobby";
 
-const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:4000/socket";
+const WS_URL =
+  import.meta.env.VITE_WS_URL || "ws://localhost:4000/socket/websocket";
 
-type SignalOfferPayload = { sdp: RTCSessionDescriptionInit };
-type SignalAnswerPayload = { sdp: RTCSessionDescriptionInit };
-type SignalIcePayload = { candidate: RTCIceCandidateInit };
-type JoinError = { reason?: string };
+const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+
+/* ============================= */
+/* Tipos de signaling            */
+/* ============================= */
+
+type SignalOfferPayload = {
+  sdp: RTCSessionDescriptionInit;
+};
+
+type SignalAnswerPayload = {
+  sdp: RTCSessionDescriptionInit;
+};
+
+type SignalIcePayload = {
+  candidate: RTCIceCandidateInit;
+};
+
+type JoinError = {
+  reason?: string;
+};
+
+/* ============================= */
+/* Chat types                     */
+/* ============================= */
+
+type ChatMessage = {
+  id: string;
+  body: string;
+  user_id: string;
+  user_name: string;
+  inserted_at: string;
+};
+
+/* ============================= */
+/* API / Join gate               */
+/* ============================= */
+
+type ApiErrorShape = {
+  error?: { message?: string };
+  message?: string;
+  reason?: string;
+};
+
+type JoinOkPayload = {
+  message?: string;
+  participant?: {
+    id: string;
+    role: string;
+    joined_at: string;
+    user_id: string;
+  };
+  room?: {
+    id: string;
+    code: string;
+    name: string;
+    created_by_id: string;
+    inserted_at: string;
+    is_active: boolean;
+  };
+};
+
+type JoinGateResult =
+  | { kind: "allowed" }
+  | { kind: "pending" }
+  | { kind: "denied"; message: string; status: number };
+
+function getAuthHeader(): Record<string, string> {
+  const token = localStorage.getItem("access_token");
+  if (!token) return {};
+  const value = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+  return { Authorization: value };
+}
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function pickMessage(data: unknown, fallback: string): string {
+  if (!data || typeof data !== "object") return fallback;
+  const d = data as ApiErrorShape;
+  return d.error?.message || d.message || d.reason || fallback;
+}
+
+function interpretJoinOkPayload(data: unknown): JoinGateResult {
+  if (!data || typeof data !== "object") return { kind: "allowed" };
+
+  const d = data as JoinOkPayload;
+
+  if (d.message === "joined" && d.participant && d.room) {
+    return { kind: "allowed" };
+  }
+
+  if (d.message === "pending") {
+    return { kind: "pending" };
+  }
+
+  return { kind: "allowed" };
+}
+
+async function requestJoin(roomCode: string): Promise<JoinGateResult> {
+  const res = await fetch(`${API_URL}/api/rooms/by-code/${roomCode}/join`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...getAuthHeader(),
+    },
+  });
+
+  const text = await res.text();
+  const data = text ? safeJsonParse(text) : null;
+
+  if (res.status === 409) return { kind: "allowed" };
+
+  if (!res.ok) {
+    const msg = pickMessage(data, `HTTP ${res.status}`);
+    return { kind: "denied", message: msg, status: res.status };
+  }
+
+  return interpretJoinOkPayload(data);
+}
+
+/* ============================= */
+/* Anti-StrictMode join dedupe   */
+/* ============================= */
+
+type JoinCacheEntry = {
+  at: number;
+  promise: Promise<JoinGateResult>;
+};
+
+const joinCache = new Map<string, JoinCacheEntry>();
+
+function requestJoinDedup(roomCode: string): Promise<JoinGateResult> {
+  const now = Date.now();
+  const cached = joinCache.get(roomCode);
+
+  if (cached && now - cached.at < 1500) {
+    return cached.promise;
+  }
+
+  const promise = requestJoin(roomCode);
+  joinCache.set(roomCode, { at: now, promise });
+
+  void promise.finally(() => {
+    setTimeout(() => {
+      const current = joinCache.get(roomCode);
+      if (current?.promise === promise) joinCache.delete(roomCode);
+    }, 2500);
+  });
+
+  return promise;
+}
+
+/* ============================= */
+/* UI                             */
+/* ============================= */
+
+type SideTab = "msgs" | "users";
 
 export default function RoomLobbyPage() {
   const { code } = useParams();
   const navigate = useNavigate();
   const roomCode = (code || "").trim();
 
-  const { user } = useAuth();
-  const myName = user?.name || "Você";
-  // se seu user tiver id, ótimo — se não tiver, a gente compara pelo nome mesmo no UI.
-  const myId = (user && "id" in user ? user.id : undefined) as
-    | string
-    | undefined;
-
   const [status, setStatus] = useState("conectando…");
-  const [joined, setJoined] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [dcState, setDcState] = useState<string>("(sem datachannel)");
+  const [pcState, setPcState] = useState<string>("(sem pc)");
+  const [channelReady, setChannelReady] = useState(false);
+
+  // Sidebar (chat/users)
+  const [sideOpen, setSideOpen] = useState(true);
+  const [sideTab, setSideTab] = useState<SideTab>("msgs");
+
+  // Lobby global users
+  const [lobbyUsers, setLobbyUsers] = useState<LobbyUserId[]>([]);
 
   // Chat
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [text, setText] = useState("");
+  const [chatText, setChatText] = useState("");
 
-  // Call
-  const [inCall, setInCall] = useState(false);
-  const [pcState, setPcState] = useState<string>("(sem pc)");
+  // Invite modal
+  const [invite, setInvite] = useState<InviteIncoming | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const channelRef = useRef<Channel | null>(null);
+  const lobbyRef = useRef<LobbyClient | null>(null);
+
   const pcRef = useRef<RTCPeerConnection | null>(null);
+  const dcRef = useRef<RTCDataChannel | null>(null);
 
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
+  // melhor que nada (depois dá pra puxar do /me)
+  const myName = useMemo(() => {
+    return localStorage.getItem("user_name") || "anon";
+  }, []);
 
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
-
-  function scrollChatToBottom() {
-    requestAnimationFrame(() => {
-      if (!chatScrollRef.current) return;
-      chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
-    });
+  function log(line: string) {
+    setLogs((prev) => [line, ...prev].slice(0, 80));
   }
 
-  async function ensureMedia(): Promise<MediaStream> {
-    if (localStreamRef.current) return localStreamRef.current;
+  const lobbyUsersSorted = useMemo(() => {
+    return [...lobbyUsers].sort((a, b) => a.localeCompare(b));
+  }, [lobbyUsers]);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
+  /* ============================= */
+  /* Chat actions                  */
+  /* ============================= */
 
-    localStreamRef.current = stream;
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
-    return stream;
+  function sendChat(): void {
+    const body = chatText.trim();
+    if (!body) return;
+
+    if (!channelReady) {
+      log("⚠️ canal ainda não está pronto");
+      return;
+    }
+
+    channelRef.current
+      ?.push("chat:new", { body, user_name: myName })
+      .receive("ok", () => setChatText(""))
+      .receive("error", (e: unknown) =>
+        log(`❌ chat erro: ${JSON.stringify(e)}`),
+      )
+      .receive("timeout", () => log("⏳ chat timeout"));
   }
 
-  async function ensurePC(): Promise<RTCPeerConnection> {
-    if (pcRef.current) return pcRef.current;
+  /* ============================= */
+  /* Helpers (WebRTC)              */
+  /* ============================= */
+
+  function bindDC(dc: RTCDataChannel): void {
+    setDcState(dc.readyState);
+
+    dc.onopen = () => {
+      setDcState(dc.readyState);
+      log("✅ datachannel open");
+    };
+
+    dc.onclose = () => {
+      setDcState(dc.readyState);
+      log("🛑 datachannel close");
+    };
+
+    dc.onmessage = (e: MessageEvent<string>) => {
+      log(`💬 ${e.data}`);
+    };
+  }
+
+  async function ensurePC(isCaller: boolean): Promise<void> {
+    if (pcRef.current) return;
 
     const pc = new RTCPeerConnection();
     pcRef.current = pc;
 
     pc.onconnectionstatechange = () => {
       setPcState(pc.connectionState);
+      log(`🔗 pc state: ${pc.connectionState}`);
     };
 
-    pc.onicecandidate = (ev) => {
+    pc.onicecandidate = (ev: RTCPeerConnectionIceEvent) => {
       if (ev.candidate) {
         channelRef.current?.push("signal:ice", {
           candidate: ev.candidate.toJSON(),
@@ -83,186 +280,293 @@ export default function RoomLobbyPage() {
       }
     };
 
-    pc.ontrack = (ev) => {
-      // remoto
-      if (remoteVideoRef.current) {
-        const [stream] = ev.streams;
-        remoteVideoRef.current.srcObject = stream;
-      }
+    pc.ondatachannel = (ev: RTCDataChannelEvent) => {
+      dcRef.current = ev.channel;
+      bindDC(ev.channel);
+      log("📡 datachannel recebido");
     };
 
-    return pc;
-  }
-
-  // Boot: socket + channel + handlers
-  useEffect(() => {
-    if (!roomCode) return;
-
-    const socket = new Socket(WS_URL, {
-      params: () => {
-        const token = localStorage.getItem("access_token");
-        const cleaned = token?.startsWith("Bearer ") ? token.slice(7) : token;
-        return cleaned ? { token: cleaned } : {};
-      },
-    });
-
-    socketRef.current = socket;
-
-    socket.onOpen(() => setStatus("socket ok ✅"));
-    socket.onError(() => setStatus("socket erro ❌"));
-    socket.onClose(() => setStatus("socket fechado 🛑"));
-
-    socket.connect();
-
-    const channel = socket.channel(`room:${roomCode}`, {});
-    channelRef.current = channel;
-
-    const joinRef = channel.join();
-
-    joinRef.receive("ok", () => {
-      setStatus("canal ok ✅");
-      setJoined(true);
-    });
-
-    joinRef.receive("error", (err: JoinError) => {
-      setStatus("falha ao entrar no canal");
-      setJoined(false);
-      console.error("join error", err);
-    });
-
-    // Chat incoming
-    channel.on("chat:message", (msg: ChatMessage) => {
-      setMessages((prev) => [...prev, msg]);
-      scrollChatToBottom();
-    });
-
-    // Signaling
-    channel.on("signal:offer", async (payload: SignalOfferPayload) => {
-      // quem recebe offer: entra em call automaticamente
-      setInCall(true);
-
-      const pc = await ensurePC();
-      const stream = await ensureMedia();
-
-      // garante tracks no PC (somente uma vez)
-      const senders = pc.getSenders();
-      const hasAnyTrack = senders.some((s) => !!s.track);
-      if (!hasAnyTrack) {
-        for (const track of stream.getTracks()) pc.addTrack(track, stream);
-      }
-
-      await pc.setRemoteDescription(payload.sdp);
-
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      channel.push("signal:answer", { sdp: pc.localDescription });
-    });
-
-    channel.on("signal:answer", async (payload: SignalAnswerPayload) => {
-      await pcRef.current?.setRemoteDescription(payload.sdp);
-    });
-
-    channel.on("signal:ice", async (payload: SignalIcePayload) => {
-      try {
-        await pcRef.current?.addIceCandidate(payload.candidate);
-      } catch (e) {
-        console.warn("addIceCandidate fail", e);
-      }
-    });
-
-    return () => {
-      try {
-        // mídia
-        localStreamRef.current?.getTracks().forEach((t) => t.stop());
-        localStreamRef.current = null;
-
-        // pc
-        pcRef.current?.close();
-        pcRef.current = null;
-
-        // channel/socket
-        channel.leave();
-        socket.disconnect();
-      } catch {
-        // ignore
-      } finally {
-        channelRef.current = null;
-        socketRef.current = null;
-        setJoined(false);
-        setInCall(false);
-      }
-    };
-  }, [roomCode]);
-
-  async function onSend() {
-    if (!joined) return;
-
-    const body = text.trim();
-    if (!body) return;
-
-    channelRef.current
-      ?.push("chat:new", { body, user_name: myName }, 10_000)
-      .receive("ok", () => setText(""))
-      .receive("error", (e) => console.error("chat error", e));
-  }
-
-  async function startCall() {
-    if (!joined) return;
-    setInCall(true);
-
-    const pc = await ensurePC();
-    const stream = await ensureMedia();
-
-    // adiciona tracks se não tiver
-    const senders = pc.getSenders();
-    const hasAnyTrack = senders.some((s) => !!s.track);
-    if (!hasAnyTrack) {
-      for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    if (isCaller) {
+      const dc = pc.createDataChannel("chat");
+      dcRef.current = dc;
+      bindDC(dc);
+      log("📡 datachannel criado");
     }
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    channelRef.current?.push("signal:offer", { sdp: pc.localDescription });
   }
 
-  function leaveCall() {
-    // encerra call local, mas mantém chat
+  function cleanup(): void {
     try {
-      channelRef.current?.push("signal:hangup", {});
-    } catch {
-      // ignore
-    }
-
-    try {
+      lobbyRef.current?.disconnect();
+      channelRef.current?.leave();
+      socketRef.current?.disconnect();
+      dcRef.current?.close();
       pcRef.current?.close();
     } catch {
       // ignore
+    } finally {
+      lobbyRef.current = null;
+      socketRef.current = null;
+      channelRef.current = null;
+      pcRef.current = null;
+      dcRef.current = null;
+      setChannelReady(false);
     }
-    pcRef.current = null;
-    setPcState("(sem pc)");
+  }
 
-    try {
-      localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    } catch {
-      // ignore
+  /* ============================= */
+  /* Lifecycle                      */
+  /* ============================= */
+
+  useEffect(() => {
+    if (!roomCode) return;
+
+    let isMounted = true;
+
+    async function boot(): Promise<void> {
+      setChannelReady(false);
+      setStatus("validando acesso…");
+      log("🔎 solicitando entrada (join REST)…");
+
+      const gate = await requestJoinDedup(roomCode);
+
+      if (!isMounted) return;
+
+      if (gate.kind === "pending") {
+        setStatus("aguardando aprovação do dono… ⏳");
+        log("⏳ entrada pendente: aguardando aprovação");
+        return;
+      }
+
+      if (gate.kind === "denied") {
+        setStatus("não foi possível entrar");
+        log(`🚫 entrada negada: ${gate.message} (${gate.status})`);
+
+        if (gate.status === 404 || gate.status === 410) {
+          log("👻 sala não encontrada/expirada — voltando");
+          navigate("/rooms");
+        }
+        return;
+      }
+
+      setStatus("conectando socket…");
+      log("✅ entrada liberada — conectando socket");
+
+      const socket = new Socket(WS_URL, {
+        params: () => {
+          const token = localStorage.getItem("access_token");
+          const cleaned = token?.startsWith("Bearer ") ? token.slice(7) : token;
+          return cleaned ? { token: cleaned } : {};
+        },
+      });
+
+      socketRef.current = socket;
+
+      socket.onOpen(() => {
+        setStatus("socket ok ✅");
+        log("🧷 socket open");
+      });
+
+      socket.onError(() => {
+        setStatus("socket erro ❌");
+        log("💥 socket error");
+      });
+
+      socket.onClose(() => {
+        setStatus("socket fechado 🛑");
+        log("🧹 socket close");
+      });
+
+      socket.connect();
+
+      // 1) Lobby global (para convite)
+      const lobby = new LobbyClient(socket, {
+        onUsers: (users) => {
+          setLobbyUsers(users);
+        },
+        onInviteIncoming: (inc) => {
+          log(`📨 convite recebido para sala ${inc.room_code}`);
+          setInvite(inc);
+          setSideOpen(true);
+          setSideTab("users");
+        },
+        onInviteAccepted: (info) => {
+          log(`✅ convite aceito por ${info.by_user_id.slice(0, 8)}`);
+        },
+        onInviteDeclined: (info) => {
+          log(`🫷 convite recusado por ${info.by_user_id.slice(0, 8)}`);
+        },
+        onLog: (line) => log(line),
+      });
+
+      lobbyRef.current = lobby;
+      const lobbyJoin = await lobby.connect();
+      if (!lobbyJoin.ok) {
+        log(`⚠️ lobby:global falhou: ${lobbyJoin.reason}`);
+      }
+
+      // 2) Room channel
+      const channel = socket.channel(`room:${roomCode}`, {});
+      channelRef.current = channel;
+
+      const joinRef = channel.join();
+
+      joinRef.receive("ok", () => {
+        setChannelReady(true);
+        setStatus("canal ok ✅");
+        log("✅ join room channel ok");
+
+        // ✅ Chat: recebe mensagens
+        channel.on("chat:message", (msg: ChatMessage) => {
+          setMessages((prev) => [...prev, msg].slice(-200));
+        });
+      });
+
+      joinRef.receive("error", (err: JoinError) => {
+        setChannelReady(false);
+        setStatus("falha ao entrar no canal");
+        log(`❌ join error: ${JSON.stringify(err)}`);
+      });
+
+      joinRef.receive("timeout", () => {
+        setChannelReady(false);
+        setStatus("timeout ao entrar no canal");
+        log("⏳ join timeout");
+      });
+
+      // signaling handlers (mantidos)
+      channel.on("signal:offer", async (payload: SignalOfferPayload) => {
+        log("📩 offer recebida");
+        await ensurePC(false);
+
+        await pcRef.current?.setRemoteDescription(payload.sdp);
+
+        const answer = await pcRef.current?.createAnswer();
+        if (!answer) return;
+
+        await pcRef.current?.setLocalDescription(answer);
+
+        channel.push("signal:answer", {
+          sdp: pcRef.current?.localDescription,
+        });
+
+        log("📤 answer enviada");
+      });
+
+      channel.on("signal:answer", async (payload: SignalAnswerPayload) => {
+        log("📩 answer recebida");
+        await pcRef.current?.setRemoteDescription(payload.sdp);
+      });
+
+      channel.on("signal:ice", async (payload: SignalIcePayload) => {
+        try {
+          await pcRef.current?.addIceCandidate(payload.candidate);
+        } catch {
+          log("⚠️ falha ao addIceCandidate");
+        }
+      });
     }
-    localStreamRef.current = null;
 
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    void boot();
 
-    setInCall(false);
+    return () => {
+      isMounted = false;
+      cleanup();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomCode]);
+
+  /* ============================= */
+  /* Convite: ações                */
+  /* ============================= */
+
+  async function acceptInvite(): Promise<void> {
+    if (!invite) return;
+
+    // avisa o A pelo lobby
+    lobbyRef.current?.acceptInvite(invite.from_user_id, invite.room_code);
+
+    // entra via REST (idempotente) e navega
+    log("✅ aceitando convite: entrando na sala…");
+    const gate = await requestJoinDedup(invite.room_code);
+
+    if (gate.kind === "denied") {
+      log(`🚫 falha ao entrar: ${gate.message} (${gate.status})`);
+      setInvite(null);
+      return;
+    }
+
+    setInvite(null);
+    navigate(`/rooms/${invite.room_code}`);
+  }
+
+  function declineInvite(): void {
+    if (!invite) return;
+    lobbyRef.current?.declineInvite(invite.from_user_id, invite.room_code);
+    log("🫷 convite recusado");
+    setInvite(null);
+  }
+
+  /* ============================= */
+  /* Actions (WebRTC test)          */
+  /* ============================= */
+
+  async function startCall(): Promise<void> {
+    if (!roomCode) return;
+
+    if (!channelReady) {
+      log("⚠️ canal ainda não está pronto");
+      return;
+    }
+
+    log("🎬 iniciando call (caller)");
+    await ensurePC(true);
+
+    const offer = await pcRef.current?.createOffer();
+    if (!offer) return;
+
+    await pcRef.current?.setLocalDescription(offer);
+
+    channelRef.current?.push("signal:offer", {
+      sdp: pcRef.current?.localDescription,
+    });
+
+    log("📤 offer enviada");
+  }
+
+  function sendPing(): void {
+    if (!channelReady) {
+      log("⚠️ canal ainda não está pronto");
+      return;
+    }
+
+    const dc = dcRef.current;
+
+    if (!dc || dc.readyState !== "open") {
+      log("⚠️ datachannel não está open");
+      return;
+    }
+
+    dc.send(`ping ${new Date().toLocaleTimeString()}`);
+    log("📨 ping enviado");
+  }
+
+  function inviteUser(userId: string): void {
+    if (!roomCode) return;
+    lobbyRef.current?.invite(userId, roomCode);
+    log(`📨 convidando ${userId.slice(0, 8)} para sala ${roomCode}`);
   }
 
   if (!roomCode) {
     return (
       <div className="min-h-screen p-6">
-        <div className="mx-auto max-w-xl rounded-2xl border border-zinc-800 p-4">
+        <div className="mx-auto max-w-xl rounded-2xl border p-4">
           <p className="text-lg font-medium">Código inválido</p>
+          <p className="opacity-80 mt-1">
+            Parece que você entrou numa sala fantasma. (Sem ectoplasma, só
+            “undefined” mesmo.)
+          </p>
           <button
-            className="mt-4 rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900"
+            className="mt-4 rounded-xl border px-4 py-2"
             onClick={() => navigate("/rooms")}
           >
             Voltar
@@ -272,145 +576,225 @@ export default function RoomLobbyPage() {
     );
   }
 
-  const titleStatus = joined ? "✅ Sala pronta" : "⏳ Conectando…";
-
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <div className="mx-auto w-full max-w-5xl p-4 space-y-4">
-        {/* Header */}
-        <div className="rounded-2xl border border-zinc-800 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm text-zinc-400">Sala</div>
-              <div className="text-2xl font-semibold tracking-tight font-mono">
-                {roomCode}
-              </div>
-              <div className="mt-2 text-sm text-zinc-300">
-                {titleStatus} • {status}
-              </div>
-              <div className="mt-1 text-xs text-zinc-500">PC: {pcState}</div>
-            </div>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-4">
+      <InviteModal
+        open={invite !== null}
+        fromUserId={invite?.from_user_id ?? ""}
+        roomCode={invite?.room_code ?? ""}
+        roomName={invite?.room_name}
+        onAccept={() => void acceptInvite()}
+        onDecline={declineInvite}
+      />
 
-            <div className="flex items-center gap-2">
-              {!inCall ? (
+      <div className="mx-auto w-full max-w-6xl">
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[320px_1fr]">
+          {/* Sidebar */}
+          <div
+            className={`rounded-2xl border border-zinc-800 bg-zinc-950 overflow-hidden ${
+              sideOpen ? "" : "hidden lg:block"
+            }`}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-800 p-3">
+              <div className="flex gap-2">
                 <button
-                  onClick={startCall}
-                  disabled={!joined}
-                  className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
+                  onClick={() => setSideTab("msgs")}
+                  className={`rounded-xl border px-3 py-1 text-sm ${
+                    sideTab === "msgs"
+                      ? "border-zinc-600"
+                      : "border-zinc-800 opacity-70"
+                  }`}
                 >
-                  Entrar na chamada
+                  msgs
                 </button>
-              ) : (
                 <button
-                  onClick={leaveCall}
-                  className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900"
+                  onClick={() => setSideTab("users")}
+                  className={`rounded-xl border px-3 py-1 text-sm ${
+                    sideTab === "users"
+                      ? "border-zinc-600"
+                      : "border-zinc-800 opacity-70"
+                  }`}
                 >
-                  Sair da chamada
+                  users
                 </button>
-              )}
+              </div>
 
               <button
-                onClick={() => navigate("/rooms")}
-                className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900"
+                onClick={() => setSideOpen((v) => !v)}
+                className="rounded-xl border border-zinc-800 px-3 py-1 text-sm opacity-80 hover:bg-zinc-900"
+                title="Recolher"
               >
-                Voltar
+                {sideOpen ? "⟨" : "⟩"}
               </button>
             </div>
-          </div>
-        </div>
 
-        {/* Grid: Chat + Vídeo */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          {/* Chat */}
-          <div className="lg:col-span-2 rounded-2xl border border-zinc-800 overflow-hidden">
-            <div className="border-b border-zinc-800 p-3 font-semibold">
-              Chat
-            </div>
+            <div className="p-3">
+              {sideTab === "msgs" ? (
+                <div className="space-y-2">
+                  <div className="text-sm opacity-70">Mensagens</div>
 
-            <div
-              ref={chatScrollRef}
-              className="h-96 overflow-y-auto p-3 space-y-2"
-            >
-              {messages.length === 0 ? (
-                <div className="text-zinc-500 text-sm">
-                  Sem mensagem ainda. Alguém precisa abrir o baile.
+                  <div className="max-h-[55vh] overflow-auto space-y-2 text-sm">
+                    {messages.length === 0 ? (
+                      <div className="opacity-60">
+                        Ainda não tem conversa… puxa assunto 😈
+                      </div>
+                    ) : (
+                      messages.map((m) => (
+                        <div
+                          key={m.id}
+                          className="rounded-xl border border-zinc-800 px-3 py-2"
+                        >
+                          <div className="flex items-center justify-between text-xs opacity-70">
+                            <span className="font-mono">
+                              {m.user_name || m.user_id.slice(0, 8)}
+                            </span>
+                            <span>
+                              {new Date(m.inserted_at).toLocaleTimeString()}
+                            </span>
+                          </div>
+                          <div className="mt-1 whitespace-pre-wrap">
+                            {m.body}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex gap-2">
+                    <input
+                      value={chatText}
+                      onChange={(e) => setChatText(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") sendChat();
+                      }}
+                      placeholder="Escreve aí…"
+                      className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-zinc-600"
+                    />
+                    <button
+                      onClick={sendChat}
+                      className="rounded-xl border border-zinc-700 px-3 py-2 text-sm hover:bg-zinc-900"
+                      title={channelReady ? "Enviar" : "Canal não pronto"}
+                    >
+                      Enviar
+                    </button>
+                  </div>
+
+                  {/* debug discreto */}
+                  <div className="mt-3 border-t border-zinc-800 pt-3">
+                    <div className="text-xs opacity-50 mb-1">
+                      debug (se der ruim, tá aqui)
+                    </div>
+                    <div className="max-h-[16vh] overflow-auto space-y-1 text-xs font-mono opacity-70">
+                      {logs.length === 0 ? (
+                        <div className="opacity-50">Sem logs ainda…</div>
+                      ) : (
+                        logs.map((l, i) => <div key={i}>{l}</div>)
+                      )}
+                    </div>
+                  </div>
                 </div>
               ) : (
-                messages.map((m) => {
-                  const isMe =
-                    (myId && m.user_id === myId) || m.user_name === myName;
+                <div className="space-y-2">
+                  <div className="text-sm opacity-70">
+                    Usuários online (lobby)
+                  </div>
 
-                  const displayName = isMe ? "Você" : m.user_name || m.user_id;
-
-                  return (
-                    <div
-                      key={m.id}
-                      className={`rounded-xl border p-3 ${
-                        isMe
-                          ? "border-emerald-700/40 bg-emerald-500/5"
-                          : "border-zinc-800"
-                      }`}
-                    >
-                      <div className="text-xs text-zinc-400">
-                        {displayName} •{" "}
-                        {new Date(m.inserted_at).toLocaleTimeString()}
+                  <div className="max-h-[65vh] overflow-auto space-y-2">
+                    {lobbyUsersSorted.length === 0 ? (
+                      <div className="text-sm opacity-60">
+                        Ninguém online… tá parecendo domingo 7h.
                       </div>
-                      <div className="mt-1 whitespace-pre-wrap">{m.body}</div>
-                    </div>
-                  );
-                })
-              )}
-            </div>
+                    ) : (
+                      lobbyUsersSorted.map((u) => (
+                        <div
+                          key={u}
+                          className="flex items-center justify-between rounded-xl border border-zinc-800 px-3 py-2"
+                        >
+                          <span className="font-mono text-xs">
+                            {u.slice(0, 10)}
+                          </span>
+                          <button
+                            onClick={() => inviteUser(u)}
+                            className="rounded-lg border border-zinc-700 px-2 py-1 text-xs hover:bg-zinc-900"
+                          >
+                            Convidar
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
 
-            <div className="border-t border-zinc-800 p-3 flex gap-2">
-              <input
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSend();
-                }}
-                className="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 outline-none focus:border-zinc-600"
-                placeholder={joined ? "Digite sua mensagem…" : "Conectando…"}
-                disabled={!joined}
-              />
-              <button
-                onClick={onSend}
-                disabled={!joined || !text.trim()}
-                className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
-              >
-                Enviar
-              </button>
+                  <div className="text-xs opacity-50">
+                    *Lista vem do lobby global (não é só da sala).
+                  </div>
+
+                  <div className="text-xs opacity-50">
+                    Dica bruta: se você abrir dois navegadores com a mesma
+                    conta, você vai “parecer” uma pessoa só.
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
-          {/* Call */}
-          <div className="rounded-2xl border border-zinc-800 overflow-hidden">
-            <div className="border-b border-zinc-800 p-3 font-semibold">
-              Chamada
+          {/* Main area */}
+          <div className="rounded-2xl border border-zinc-800 bg-zinc-950 p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="text-sm opacity-70">Sala</p>
+                <h1 className="text-2xl font-semibold font-mono">{roomCode}</h1>
+                <p className="mt-1 text-sm opacity-80">Status: {status}</p>
+                <p className="mt-1 text-sm opacity-80">
+                  PC: {pcState} • DC: {dcState}
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setSideOpen(true)}
+                  className="rounded-xl border border-zinc-800 px-4 py-2 hover:bg-zinc-900"
+                >
+                  Painel
+                </button>
+
+                <button
+                  onClick={() => navigate(`/rooms`)}
+                  className="rounded-xl border border-zinc-800 px-4 py-2 hover:bg-zinc-900"
+                >
+                  Voltar
+                </button>
+              </div>
             </div>
 
-            {!inCall ? (
-              <div className="p-4 text-sm text-zinc-400">
-                Chat já tá vivo. Vídeo só quando você mandar — do jeito que uma
-                sala decente deveria ser.
+            {/* “Área de vídeo” (placeholder por enquanto) */}
+            <div className="mt-5 rounded-2xl border border-zinc-800 p-6 text-center">
+              <div className="text-sm opacity-70">Área da chamada</div>
+              <div className="mt-2 text-lg opacity-80">
+                Aqui vai o vídeo — e a glória.
               </div>
-            ) : (
-              <div className="p-3 space-y-3">
-                <video
-                  ref={localVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full rounded-xl border border-zinc-800"
-                />
-                <video
-                  ref={remoteVideoRef}
-                  autoPlay
-                  playsInline
-                  className="w-full rounded-xl border border-zinc-800"
-                />
+
+              <div className="mt-4 flex flex-wrap justify-center gap-2">
+                <button
+                  onClick={() => void startCall()}
+                  disabled={!channelReady}
+                  className="rounded-xl border border-zinc-700 px-4 py-2 disabled:opacity-50 hover:bg-zinc-900"
+                >
+                  Iniciar chamada (chamador)
+                </button>
+
+                <button
+                  onClick={sendPing}
+                  disabled={!channelReady}
+                  className="rounded-xl border border-zinc-700 px-4 py-2 disabled:opacity-50 hover:bg-zinc-900"
+                >
+                  Enviar ping
+                </button>
               </div>
-            )}
+            </div>
+
+            <div className="mt-4 text-xs opacity-50">
+              Dica: use “users” na lateral pra convidar alguém online.
+            </div>
           </div>
         </div>
       </div>

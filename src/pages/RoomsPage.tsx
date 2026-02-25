@@ -7,40 +7,61 @@ type Room = {
   id: string;
   code: string;
   name: string;
-  // opcional (se o backend já mandar)
   participants_count?: number;
-  // opcional (se o backend mandar outro nome)
   participants_active_count?: number;
 };
 
-function getAuthHeader() {
+function getAuthHeaderValue(): string | null {
   const token = localStorage.getItem("access_token");
-  if (!token) return {};
-  // você guarda puro ou "Bearer ..." — vamos aceitar ambos
-  const value = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-  return { Authorization: value };
+  if (!token) return null;
+  return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
 }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+
+  // só seta Content-Type se não existir (pra não quebrar uploads futuros)
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const auth = getAuthHeaderValue();
+  if (auth) headers.set("Authorization", auth);
+
   const res = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...getAuthHeader(),
-      ...(init?.headers as Record<string, string> || {}),
-    } as HeadersInit,
+    headers,
   });
 
   const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  const data: unknown = text
+    ? (() => {
+        try {
+          return JSON.parse(text) as unknown;
+        } catch {
+          return null;
+        }
+      })()
+    : null;
 
   if (!res.ok) {
-    const msg =
-      data?.error?.message ||
-      data?.message ||
-      data?.error ||
+    const d =
+      data && typeof data === "object"
+        ? (data as Record<string, unknown>)
+        : null;
+
+    const message =
+      (d?.error &&
+      typeof d.error === "object" &&
+      (d.error as Record<string, unknown>).message &&
+      typeof (d.error as Record<string, unknown>).message === "string"
+        ? ((d.error as Record<string, unknown>).message as string)
+        : null) ||
+      (d?.message && typeof d.message === "string" ? d.message : null) ||
+      (d?.error && typeof d.error === "string" ? d.error : null) ||
       `HTTP ${res.status}`;
-    throw new Error(msg);
+
+    throw new Error(message);
   }
 
   return data as T;
@@ -53,10 +74,7 @@ export default function RoomsPage() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // criar sala
   const [newName, setNewName] = useState("");
-
-  // buscar por código
   const [searchCode, setSearchCode] = useState("");
 
   const sortedRooms = useMemo(() => {
@@ -67,12 +85,11 @@ export default function RoomsPage() {
     setLoading(true);
     setErr(null);
     try {
-      // ajuste se seu backend retornar outra forma
-      // ex: { rooms: [...] }
       const res = await api<{ rooms: Room[] }>("/api/rooms");
       setRooms(res.rooms || []);
     } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "Falha ao carregar salas";
+      const message =
+        e instanceof Error ? e.message : "Falha ao carregar salas";
       setErr(message);
     } finally {
       setLoading(false);
@@ -80,8 +97,7 @@ export default function RoomsPage() {
   }
 
   useEffect(() => {
-    loadRooms();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void loadRooms();
   }, []);
 
   async function onCreateRoom() {
@@ -92,7 +108,6 @@ export default function RoomsPage() {
     setErr(null);
 
     try {
-      // normal: POST /api/rooms { room: { name } }
       const res = await api<{ room: Room }>("/api/rooms", {
         method: "POST",
         body: JSON.stringify({ room: { name } }),
@@ -100,7 +115,6 @@ export default function RoomsPage() {
 
       const created = res.room;
       setNewName("");
-      // entra direto na sala recém criada
       navigate(`/rooms/${created.code}`);
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : "Falha ao criar sala";
@@ -118,7 +132,6 @@ export default function RoomsPage() {
     setErr(null);
 
     try {
-      // normal: GET /api/rooms/by-code/:code
       const res = await api<{ room: Room }>(`/api/rooms/by-code/${code}`);
       navigate(`/rooms/${res.room.code}`);
     } catch (e: unknown) {
@@ -130,17 +143,13 @@ export default function RoomsPage() {
   }
 
   function peopleCount(r: Room) {
-    // tenta os nomes mais prováveis
     const n = r.participants_count ?? r.participants_active_count ?? undefined;
-
-    // se o backend não manda, mostramos “—”
     return typeof n === "number" ? n : null;
   }
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
       <div className="mx-auto w-full max-w-5xl space-y-4">
-        {/* Header */}
         <div className="rounded-2xl border border-zinc-800 p-5">
           <div className="flex items-start justify-between gap-3">
             <div>
@@ -167,9 +176,7 @@ export default function RoomsPage() {
           )}
         </div>
 
-        {/* Ações: Criar / Buscar */}
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {/* Criar */}
           <div className="rounded-2xl border border-zinc-800 p-5">
             <h2 className="font-semibold">Criar sala</h2>
             <p className="mt-1 text-sm text-zinc-400">
@@ -181,13 +188,13 @@ export default function RoomsPage() {
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") onCreateRoom();
+                  if (e.key === "Enter") void onCreateRoom();
                 }}
                 className="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 outline-none focus:border-zinc-600"
                 placeholder="Ex: Daily do Caos"
               />
               <button
-                onClick={onCreateRoom}
+                onClick={() => void onCreateRoom()}
                 disabled={loading || !newName.trim()}
                 className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
               >
@@ -196,7 +203,6 @@ export default function RoomsPage() {
             </div>
           </div>
 
-          {/* Buscar */}
           <div className="rounded-2xl border border-zinc-800 p-5">
             <h2 className="font-semibold">Buscar por código</h2>
             <p className="mt-1 text-sm text-zinc-400">
@@ -208,13 +214,13 @@ export default function RoomsPage() {
                 value={searchCode}
                 onChange={(e) => setSearchCode(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") onFindByCode();
+                  if (e.key === "Enter") void onFindByCode();
                 }}
                 className="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 outline-none focus:border-zinc-600 font-mono"
                 placeholder="Ex: I-nevHo9"
               />
               <button
-                onClick={onFindByCode}
+                onClick={() => void onFindByCode()}
                 disabled={loading || !searchCode.trim()}
                 className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
               >
@@ -224,7 +230,6 @@ export default function RoomsPage() {
           </div>
         </div>
 
-        {/* Lista */}
         <div className="rounded-2xl border border-zinc-800 overflow-hidden">
           <div className="border-b border-zinc-800 p-4 flex items-center justify-between">
             <div>
@@ -271,7 +276,6 @@ export default function RoomsPage() {
           </div>
         </div>
 
-        {/* Dica */}
         <div className="text-xs text-zinc-500">
           Obs: se “pessoas: —” aparecer, é porque o backend ainda não manda a
           contagem. A gente resolve isso com um patch de 10 linhas.
