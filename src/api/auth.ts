@@ -2,29 +2,30 @@ import { api } from "./client";
 
 export type User = {
   id: string;
-  email?: string;
-  name?: string;
-  username?: string;
+  name: string;
+  email: string | null;
+  avatar_url: string | null;
+  github_login: string | null;
 };
 
-export async function register(payload: {
-  name: string;
-  email: string;
-  password: string;
-}) {
-  return api<{ token: string }>("/api/register", {
+export type AuthResponse = { token: string; user: User };
+
+export function register(payload: { name: string; email: string; password: string }) {
+  return api<AuthResponse>("/api/register", {
     method: "POST",
-    body: JSON.stringify({ user: payload }),
+    body: { user: payload },
+    auth: false,
   });
 }
 
-export async function login(payload: { email: string; password: string }) {
-  return api<{ token: string }>("/api/login", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+export function login(payload: { email: string; password: string }) {
+  return api<AuthResponse>("/api/login", { method: "POST", body: payload, auth: false });
 }
 
-export async function me() {
-  return api<{ user: User }>("/api/me", { auth: true });
+export function loginWithGithub(payload: { code: string; redirect_uri: string }) {
+  return api<AuthResponse>("/api/auth/github", { method: "POST", body: payload, auth: false });
+}
+
+export function me() {
+  return api<{ user: User }>("/api/me");
 }

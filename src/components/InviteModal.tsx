@@ -1,52 +1,53 @@
-type Props = {
-  open: boolean;
-  fromUserId: string;
-  roomCode: string;
-  roomName?: string;
-  onAccept: () => void;
-  onDecline: () => void;
-};
+import { useNavigate } from "react-router-dom";
+import { useSocket } from "../realtime/useSocket";
+import { Avatar } from "../ui/Avatar";
+import { Button } from "../ui/Button";
 
-export function InviteModal(props: Props) {
-  if (!props.open) return null;
+/** Convite para sala privada: aparece em qualquer tela do app, só para quem foi convidado. */
+export function InviteModal() {
+  const { invites, answerInvite } = useSocket();
+  const navigate = useNavigate();
+  const invite = invites[0];
+
+  if (!invite) return null;
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4">
-      <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-5 text-zinc-100 shadow-xl">
-        <div className="text-sm opacity-70">Convite</div>
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="invite-title"
+      className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"
+    >
+      <div className="w-full max-w-md bg-ink-850 p-6 shadow-2xl">
+        <p className="text-xs font-bold uppercase tracking-widest text-heat-yellow">Convite</p>
 
-        <div className="mt-2 text-lg font-semibold">
-          Você foi convidado para uma sala
-        </div>
-
-        <div className="mt-2 space-y-1 text-sm text-zinc-300">
-          <div>
-            <span className="opacity-70">Sala:</span>{" "}
-            <span className="font-mono">{props.roomCode}</span>
-            {props.roomName ? (
-              <span className="opacity-70"> • {props.roomName}</span>
-            ) : null}
-          </div>
-
-          <div>
-            <span className="opacity-70">De:</span>{" "}
-            <span className="font-mono">{props.fromUserId.slice(0, 8)}</span>
+        <div className="mt-4 flex items-center gap-4">
+          <Avatar src={invite.from.avatar_url} name={invite.from.name} size={56} />
+          <div className="min-w-0">
+            <h2 id="invite-title" className="text-lg font-bold leading-snug">
+              {invite.from.name} te chamou para uma sala
+            </h2>
+            <p className="truncate text-fog-300">{invite.room_name}</p>
           </div>
         </div>
 
-        <div className="mt-5 flex gap-2">
-          <button
-            onClick={props.onDecline}
-            className="flex-1 rounded-xl border border-zinc-800 px-4 py-2 hover:bg-zinc-900"
-          >
+        {invites.length > 1 && (
+          <p className="mt-3 text-xs text-fog-500">+{invites.length - 1} convite(s) na fila</p>
+        )}
+
+        <div className="mt-6 flex gap-3">
+          <Button variant="ghost" className="flex-1" onClick={() => answerInvite(invite, false)}>
             Recusar
-          </button>
-          <button
-            onClick={props.onAccept}
-            className="flex-1 rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900"
+          </Button>
+          <Button
+            className="flex-1"
+            onClick={() => {
+              answerInvite(invite, true);
+              navigate(`/rooms/${encodeURIComponent(invite.room_code)}`);
+            }}
           >
             Aceitar
-          </button>
+          </Button>
         </div>
       </div>
     </div>

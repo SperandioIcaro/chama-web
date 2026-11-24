@@ -1,223 +1,74 @@
-# Chama Web (Front-end)
+# 🔥 Chama Web
 
-Front-end do **Chama**, um projeto de **videochamada** focado em uma experiência moderna, simples e escalável: autenticação com JWT, salas (Rooms) e, na sequência, integração com **WebRTC** para áudio/vídeo em tempo real.
+Front-end do **Chama**: videochamadas em **salas privadas por convite** e uma **sala geral** aberta (mural em tempo real),
+com o visual do NLW Heat (fundo escuro, rosa `#FF008E` e amarelo `#FFCD1E`, avatares com anel degradê).
 
-> **Objetivo:** oferecer uma interface web rápida e bonita para:
-> **Login / Cadastro → Sessão (/me) → Salas → Chamada.**
+## O que tem
 
----
+- **Login**: GitHub (OAuth) **ou** conta Chama (email + senha com validação forte, igual à da API)
+- **Sala geral** (`/`): mural estilo Heat — últimas 3 mensagens, novas entram a cada 3 s, histórico salvo no servidor
+- **Salas privadas** (`/rooms`): crie, copie o **link de convite**, entre por código/link, convide quem está online
+- **Chamada de vídeo** (`/rooms/:code`): até 6 pessoas (WebRTC em malha), microfone/câmera, chat e lista de pessoas
+- **Multiplataforma**: responsivo (celular, tablet, desktop), instalável como app (manifest PWA) e com a API pronta para um app nativo
 
-## ✨ O que esse front faz (agora)
-
-- ✅ **Cadastro** de usuário (Register)
-- ✅ **Login** (JWT)
-- ✅ **Sessão persistida** via token no `localStorage`
-- ✅ **Rotas protegidas** (bloqueia acesso sem token)
-- ✅ **Integração com API Phoenix** rodando em `http://localhost:4000`
-
-Próximos passos previstos:
-
-- ⏭️ **Rooms** (criar, listar, entrar por código)
-- ⏭️ **Chamada** (WebRTC + signaling)
-
----
-
-## 🧠 Arquitetura (resumo)
-
-- **Vite + React + TypeScript**
-- **AuthProvider** mantém estado da sessão (token + user)
-- Requests centralizados em `src/api/client.ts`
-- Páginas:
-  - `/login`
-  - `/register`
-  - `/` (protegida)
-
----
-
-## 🧰 Tecnologias e bibliotecas
-
-### Core
-
-- **Vite** (build/dev server)
-- **React**
-- **TypeScript**
-
-### UI / Estilo
-
-- **TailwindCSS (v4)** usando `@tailwindcss/vite` (setup moderno)
-- Componentes base custom: `Button`, `Input`, `Card`
-
-### Forms e validação
-
-- **react-hook-form**
-- **zod**
-- **@hookform/resolvers**
-
-### Estado e UX
-
-- **@tanstack/react-query** (pronto para cache/fetch de recursos como Rooms)
-- **sonner** (toasts/notifications)
-- **react-router-dom** (rotas)
-
----
-
-## 📦 Requisitos
-
-- **Node.js** recomendado: **22.13+** (ou superior compatível)
-- **NPM** (ou pnpm/yarn, se preferir)
-- API rodando localmente em:
-  - `http://localhost:4000`
-
----
-
-## 🚀 Instalação
-
-Clone o repositório do front e instale as dependências:
+## Rodando
 
 ```bash
+cp .env.example .env      # ajuste VITE_API_BASE e VITE_GITHUB_CLIENT_ID
 npm install
+npm run dev               # http://localhost:5173
 ```
 
-````
+Requer a [chama-api](../chama-api-main) rodando (padrão `http://localhost:4000`).
 
-Crie um arquivo `.env` na raiz do projeto:
+### Login com GitHub
+
+1. GitHub → Settings → Developer settings → OAuth Apps → **New OAuth App**
+2. _Authorization callback URL_: `http://localhost:5173/auth/github/callback` (em produção, o domínio do front)
+3. Coloque o **Client ID** em `VITE_GITHUB_CLIENT_ID` (front) e Client ID + **Secret** em `GITHUB_CLIENT_ID`/`GITHUB_CLIENT_SECRET` (API)
+
+### Testando no celular (mesma rede Wi-Fi)
 
 ```bash
-VITE_API_BASE=http://localhost:4000
+# 1) no .env do front, deixe a API pelo proxy do Vite (e apague/comente o VITE_WS_URL):
+VITE_API_BASE=
+
+# 2) rode a API (./run.sh) e, em outro terminal:
+npm run dev:lan        # HTTPS + exposto na rede; mostra o endereço para abrir no celular
 ```
 
----
+Câmera e microfone **só funcionam em HTTPS**, por isso o `dev:lan` já sobe com certificado autoassinado
+(instala o `@vitejs/plugin-basic-ssl` sozinho na primeira vez). Na primeira abertura no celular, aceite o aviso
+("Avançado → continuar"). Quer HTTP puro (sem vídeo)? `npm run dev:http`.
+O login com GitHub não funciona por IP (o callback do OAuth App é fixo); use email e senha no celular.
 
-## ▶️ Rodando o projeto
+### Chamada de vídeo
 
-### Dev server (modo desenvolvimento)
+- Câmera/microfone só funcionam em **HTTPS** ou `localhost`.
+- Sem servidor **TURN**, cerca de 1 em cada 5 pessoas (NAT restritivo/rede corporativa) não completa a chamada.
+  Configure `VITE_ICE_SERVERS` com um TURN (ex.: coturn, Twilio, Cloudflare) antes de abrir para o público.
+- A malha P2P é ótima até ~4–6 pessoas. Acima disso, o caminho é um SFU (LiveKit, mediasoup).
 
-```bash
-npm run dev
-```
-
-Acesse:
-
-- Front: `http://localhost:5173`
-- API: `http://localhost:4000`
-
-### Build de produção
-
-```bash
-npm run build
-```
-
-### Pré-visualizar build
-
-```bash
-npm run preview
-```
-
----
-
-## 🧪 Testes rápidos (fluxo recomendado)
-
-1. **Cadastre** em `/register`
-2. Verifique se redireciona para `/` com sessão ativa
-3. Faça **logout** e teste login em `/login`
-4. Verifique se `/` só abre quando estiver autenticado
-
----
-
-## ⌨️ Atalhos e comandos úteis
-
-### NPM Scripts
-
-- `npm run dev` — inicia o servidor de desenvolvimento
-- `npm run build` — gera build de produção
-- `npm run preview` — serve o build para testar localmente
-- `npm run lint` — executa o ESLint (se configurado no projeto)
-
-### Dica de limpeza (quando cache dá chilique)
-
-Se algo ficar estranho após mexer em configs:
-
-```bash
-rm -rf node_modules .vite
-npm install
-npm run dev
-```
-
----
-
-## 🔐 Autenticação (como funciona)
-
-- Ao fazer **login/register**, a API retorna um **JWT**.
-- O token é salvo em `localStorage` como `access_token`.
-- Requisições autenticadas incluem:
-  - `Authorization: Bearer <token>`
-
-- A rota `/` é protegida via `RequireAuth`.
-
----
-
-## 📁 Estrutura de pastas (resumida)
+## Estrutura
 
 ```
 src/
-  api/
-    client.ts       # fetch wrapper + token
-    auth.ts         # endpoints de auth
-  app/
-    App.tsx
-    router.tsx
-    providers.tsx
-  auth/
-    AuthContext.ts
-    AuthProvider.tsx
-    RequireAuth.tsx
-    useAuth.ts
-  pages/
-    Login.tsx
-    Register.tsx
-    Home.tsx
-  ui/
-    Button.tsx
-    Input.tsx
-    Card.tsx
+  api/         cliente HTTP único (erros, token, 401) + auth e salas
+  auth/        AuthProvider, login GitHub (state anti-CSRF), RequireAuth
+  realtime/    SocketProvider (1 conexão p/ o app todo), canais de sala, chat, presença
+  hooks/       useRoomCall (WebRTC), useWallMessages (fila do mural)
+  components/  mural, cartão de envio, grade de vídeo, chat, pessoas, convite
+  pages/       Login, Register, GithubCallback, GeneralRoom, RoomsPage, RoomPage
+  ui/          Button, Input, Avatar (anel degradê), Logo, Panel, Spinner
+  index.css    tokens do tema (Tailwind v4 @theme)
 ```
 
----
+## Scripts
 
-## 🔌 Integração com a API
+`npm run dev` · `npm run dev:lan` · `npm run build` · `npm run preview` · `npm run lint`
 
-Este front espera que a API:
+## Ideias para a próxima etapa
 
-- aceite cadastro no formato:
-
-  ```json
-  { "user": { "name": "...", "email": "...", "password": "..." } }
-  ```
-
-- retorne `token` no login e register
-- disponibilize `GET /api/me` protegido por JWT
-
-Base URL configurável por ambiente:
-
-- `.env` → `VITE_API_BASE`
-
----
-
-## 📌 Roadmap (curto e direto)
-
-- [x] Auth (Register/Login/Me + rotas protegidas)
-- [ ] Rooms (CRUD + join)
-- [ ] Lobby / sala (UI)
-- [ ] WebRTC (mídia + track + troca de dispositivos)
-- [ ] UX de chamada (mute, cam off, trocar camera, reconectar)
-
----
-
-## 🧾 Licença
-
-Uso livre dentro do projeto **Chama**. Ajuste conforme sua necessidade (MIT, etc).
-
-```
-::contentReference[oaicite:0]{index=0}
-```
-````
+- App nativo (Expo/React Native), reaproveitando a API como o Heat fez: `POST /api/auth/github` já aceita `redirect_uri` do app
+- Compartilhamento de tela, indicador de quem está falando, reconexão automática da chamada
+- Service worker (cache offline / notificações push)

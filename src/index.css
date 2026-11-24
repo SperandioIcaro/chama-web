@@ -1,16 +1,91 @@
 @import "tailwindcss";
 
-:root {
-  color-scheme: dark;
+/* ───────── Tokens visuais (paleta do NLW Heat) ───────── */
+@theme {
+  --font-sans: "Roboto", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* superfícies */
+  --color-ink-950: #09090a;
+  --color-ink-900: #121214;
+  --color-ink-850: #1b1b1f;
+  --color-ink-800: #202024;
+  --color-ink-700: #29292e;
+  --color-ink-600: #323238;
+
+  /* texto */
+  --color-fog-100: #e1e1e6;
+  --color-fog-300: #c4c4cc;
+  --color-fog-500: #8d8d99;
+
+  /* marca */
+  --color-heat-pink: #ff008e;
+  --color-heat-yellow: #ffcd1e;
+  --color-heat-orange: #ff7a29;
+  --color-heat-green: #1b873f;
 }
 
-html,
-body,
-#root {
-  height: 100%;
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--color-ink-900);
+    color: var(--color-fog-100);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    /* evita "pulo" de layout quando a barra do navegador mobile some */
+    overscroll-behavior-y: none;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-heat-yellow);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: var(--color-heat-pink);
+    color: #fff;
+  }
+
+  /* scrollbar discreta */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-ink-600) transparent;
+  }
 }
 
-body {
-  background: #09090b; /* zinc-950 */
-  color: #fafafa;
+@layer components {
+  /* anel degradê dos avatares (assinatura visual do Heat) */
+  .avatar-ring {
+    display: inline-block;
+    padding: 2px;
+    line-height: 0;
+    border-radius: 9999px;
+    background: linear-gradient(100deg, #ff008e 0%, #ffcd1e 100%);
+  }
+
+  .text-heat-gradient {
+    background: linear-gradient(100deg, #ff008e 0%, #ffcd1e 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* faixa de hexágonos do Heat */
+  .heat-pattern {
+    background: url("/heat-pattern.svg") no-repeat center top / cover;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

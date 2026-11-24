@@ -1,28 +1,56 @@
-import React from "react";
+import type { ComponentProps, ReactNode } from "react";
+import { Spinner } from "./Spinner";
 
-export function Button(
-  props: React.ButtonHTMLAttributes<HTMLButtonElement> & {
-    variant?: "solid" | "ghost";
-  },
-) {
-  const variant = props.variant ?? "solid";
+type Variant = "yellow" | "pink" | "ghost" | "dark";
+type Size = "sm" | "md";
 
-  const base =
-    "inline-flex items-center justify-center rounded-xl px-4 py-3 font-medium transition active:scale-[0.99] disabled:opacity-50";
+type Props = ComponentProps<"button"> & {
+  variant?: Variant;
+  size?: Size;
+  loading?: boolean;
+  icon?: ReactNode;
+};
 
-  const solid = "bg-white text-zinc-950 hover:bg-zinc-200";
+const variants: Record<Variant, string> = {
+  yellow: "bg-heat-yellow text-ink-950",
+  pink: "bg-heat-pink text-white",
+  dark: "bg-ink-700 text-fog-100",
+  ghost: "border border-ink-600 bg-transparent text-fog-100 hover:bg-ink-800",
+};
 
-  const ghost =
-    "bg-white/0 text-zinc-100 hover:bg-white/10 border border-white/10";
+const sizes: Record<Size, string> = {
+  sm: "h-9 px-4 text-xs",
+  md: "h-12 px-8 text-sm",
+};
 
+/** Botão no estilo Heat: reto, caixa-alta e em negrito. */
+export function Button({
+  variant = "yellow",
+  size = "md",
+  loading = false,
+  icon,
+  className = "",
+  children,
+  disabled,
+  type = "button",
+  ...rest
+}: Props) {
   return (
     <button
-      {...props}
+      {...rest}
+      type={type}
+      disabled={disabled || loading}
       className={[
-        base,
-        variant === "solid" ? solid : ghost,
-        props.className ?? "",
+        "inline-flex items-center justify-center gap-3 font-bold uppercase tracking-wide",
+        "transition enabled:hover:brightness-90 enabled:active:scale-[0.99]",
+        "disabled:cursor-not-allowed disabled:opacity-50",
+        variants[variant],
+        sizes[size],
+        className,
       ].join(" ")}
-    />
+    >
+      {loading ? <Spinner className="h-4 w-4" /> : icon}
+      {children}
+    </button>
   );
 }

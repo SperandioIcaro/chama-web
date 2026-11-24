@@ -1,286 +1,194 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Copy, Lock, Trash2, Users } from "lucide-react";
+import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
+import { toast } from "sonner";
+import { getErrorMessage } from "../api/error";
+import { createRoom, deleteRoom, extractRoomCode, inviteLink, listRooms, type Room } from "../api/rooms";
+import { Button } from "../ui/Button";
+import { Input } from "../ui/Input";
+import { Spinner } from "../ui/Spinner";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
-
-type Room = {
-  id: string;
-  code: string;
-  name: string;
-  participants_count?: number;
-  participants_active_count?: number;
-};
-
-function getAuthHeaderValue(): string | null {
-  const token = localStorage.getItem("access_token");
-  if (!token) return null;
-  return token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-
-  // só seta Content-Type se não existir (pra não quebrar uploads futuros)
-  if (!headers.has("Content-Type")) {
-    headers.set("Content-Type", "application/json");
+async function copyInvite(room: Room) {
+  try {
+    await navigator.clipboard.writeText(inviteLink(room.code));
+    toast.success("Link de convite copiado");
+  } catch {
+    toast.error("Não consegui copiar. Copie o código manualmente.");
   }
-
-  const auth = getAuthHeaderValue();
-  if (auth) headers.set("Authorization", auth);
-
-  const res = await fetch(`${API_URL}${path}`, {
-    ...init,
-    headers,
-  });
-
-  const text = await res.text();
-  const data: unknown = text
-    ? (() => {
-        try {
-          return JSON.parse(text) as unknown;
-        } catch {
-          return null;
-        }
-      })()
-    : null;
-
-  if (!res.ok) {
-    const d =
-      data && typeof data === "object"
-        ? (data as Record<string, unknown>)
-        : null;
-
-    const message =
-      (d?.error &&
-      typeof d.error === "object" &&
-      (d.error as Record<string, unknown>).message &&
-      typeof (d.error as Record<string, unknown>).message === "string"
-        ? ((d.error as Record<string, unknown>).message as string)
-        : null) ||
-      (d?.message && typeof d.message === "string" ? d.message : null) ||
-      (d?.error && typeof d.error === "string" ? d.error : null) ||
-      `HTTP ${res.status}`;
-
-    throw new Error(message);
-  }
-
-  return data as T;
 }
 
 export default function RoomsPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const [code, setCode] = useState("");
 
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const rooms = useQuery({
+    queryKey: ["rooms"],
+    queryFn: async () => (await listRooms()).filter((r) => r.kind === "private"),
+  });
 
-  const [newName, setNewName] = useState("");
-  const [searchCode, setSearchCode] = useState("");
+  const create = useMutation({
+    mutationFn: (roomName: string) => createRoom({ name: roomName }),
+    onSuccess: (room) => {
+      void qc.invalidateQueries({ queryKey: ["rooms"] });
+      navigate(`/rooms/${encodeURIComponent(room.code)}`);
+    },
+    onError: (e) => toast.error(getErrorMessage(e, "Não foi possível criar a sala.")),
+  });
 
-  const sortedRooms = useMemo(() => {
-    return [...rooms].sort((a, b) => a.name.localeCompare(b.name));
-  }, [rooms]);
+  const remove = useMutation({
+    mutationFn: (room: Room) => deleteRoom(room.id),
+    onSuccess: () => {
+      toast.success("Sala apagada");
+      void qc.invalidateQueries({ queryKey: ["rooms"] });
+    },
+    onError: (e) => toast.error(getErrorMessage(e, "Não foi possível apagar a sala.")),
+  });
 
-  async function loadRooms() {
-    setLoading(true);
-    setErr(null);
-    try {
-      const res = await api<{ rooms: Room[] }>("/api/rooms");
-      setRooms(res.rooms || []);
-    } catch (e: unknown) {
-      const message =
-        e instanceof Error ? e.message : "Falha ao carregar salas";
-      setErr(message);
-    } finally {
-      setLoading(false);
-    }
+  function onCreate(e: FormEvent) {
+    e.preventDefault();
+    const value = name.trim();
+    if (value.length >= 2) create.mutate(value);
   }
 
-  useEffect(() => {
-    void loadRooms();
-  }, []);
-
-  async function onCreateRoom() {
-    const name = newName.trim();
-    if (!name) return;
-
-    setLoading(true);
-    setErr(null);
-
-    try {
-      const res = await api<{ room: Room }>("/api/rooms", {
-        method: "POST",
-        body: JSON.stringify({ room: { name } }),
-      });
-
-      const created = res.room;
-      setNewName("");
-      navigate(`/rooms/${created.code}`);
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "Falha ao criar sala";
-      setErr(message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function onFindByCode() {
-    const code = searchCode.trim();
-    if (!code) return;
-
-    setLoading(true);
-    setErr(null);
-
-    try {
-      const res = await api<{ room: Room }>(`/api/rooms/by-code/${code}`);
-      navigate(`/rooms/${res.room.code}`);
-    } catch (e: unknown) {
-      const message = e instanceof Error ? e.message : "Sala não encontrada";
-      setErr(message);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  function peopleCount(r: Room) {
-    const n = r.participants_count ?? r.participants_active_count ?? undefined;
-    return typeof n === "number" ? n : null;
+  function onJoin(e: FormEvent) {
+    e.preventDefault();
+    const value = extractRoomCode(code);
+    if (value) navigate(`/rooms/${encodeURIComponent(value)}`);
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 p-6">
-      <div className="mx-auto w-full max-w-5xl space-y-4">
-        <div className="rounded-2xl border border-zinc-800 p-5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-semibold">Salas</h1>
-              <p className="mt-1 text-sm text-zinc-400">
-                Crie uma, encontre por código, ou escolha uma da lista.
-              </p>
-            </div>
+    <div className="mx-auto w-full max-w-[1200px] px-5 py-8">
+      <header>
+        <h1 className="text-xs font-bold uppercase tracking-widest text-heat-yellow">Salas privadas</h1>
+        <p className="mt-2 max-w-xl text-2xl font-bold leading-8">
+          Chamadas de vídeo e chat só para quem recebeu o convite.
+        </p>
+      </header>
 
-            <button
-              onClick={loadRooms}
-              className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
-              disabled={loading}
-              title="Atualizar lista"
-            >
-              Atualizar
-            </button>
+      <div className="mt-8 grid gap-6 md:grid-cols-2">
+        <form onSubmit={onCreate} className="bg-ink-850 p-6">
+          <h2 className="text-lg font-bold">Criar sala</h2>
+          <p className="mt-1 text-sm text-fog-300">
+            Você recebe um link de convite para mandar para quem quiser.
+          </p>
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+            <Input
+              aria-label="Nome da sala"
+              value={name}
+              maxLength={60}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Ex.: Daily do Caos"
+            />
+            <Button type="submit" variant="pink" loading={create.isPending} disabled={name.trim().length < 2}>
+              Criar
+            </Button>
           </div>
+        </form>
 
-          {err && (
-            <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/5 p-3 text-sm text-red-200">
-              {err}
-            </div>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <div className="rounded-2xl border border-zinc-800 p-5">
-            <h2 className="font-semibold">Criar sala</h2>
-            <p className="mt-1 text-sm text-zinc-400">
-              Dê um nome e pronto — nasce uma sala novinha em folha.
-            </p>
-
-            <div className="mt-4 flex gap-2">
-              <input
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void onCreateRoom();
-                }}
-                className="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 outline-none focus:border-zinc-600"
-                placeholder="Ex: Daily do Caos"
-              />
-              <button
-                onClick={() => void onCreateRoom()}
-                disabled={loading || !newName.trim()}
-                className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
-              >
-                Criar
-              </button>
-            </div>
+        <form onSubmit={onJoin} className="bg-ink-850 p-6">
+          <h2 className="text-lg font-bold">Entrar com convite</h2>
+          <p className="mt-1 text-sm text-fog-300">Cole o código ou o link que você recebeu.</p>
+          <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+            <Input
+              aria-label="Código ou link de convite"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="Código ou link"
+              className="font-mono"
+              autoCapitalize="off"
+              autoCorrect="off"
+              spellCheck={false}
+            />
+            <Button type="submit" disabled={code.trim() === ""}>
+              Entrar
+            </Button>
           </div>
-
-          <div className="rounded-2xl border border-zinc-800 p-5">
-            <h2 className="font-semibold">Buscar por código</h2>
-            <p className="mt-1 text-sm text-zinc-400">
-              Já tem o código? Entra sem cerimônia.
-            </p>
-
-            <div className="mt-4 flex gap-2">
-              <input
-                value={searchCode}
-                onChange={(e) => setSearchCode(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void onFindByCode();
-                }}
-                className="flex-1 rounded-xl bg-zinc-950 border border-zinc-800 px-3 py-2 outline-none focus:border-zinc-600 font-mono"
-                placeholder="Ex: I-nevHo9"
-              />
-              <button
-                onClick={() => void onFindByCode()}
-                disabled={loading || !searchCode.trim()}
-                className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900 disabled:opacity-50"
-              >
-                Buscar
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="rounded-2xl border border-zinc-800 overflow-hidden">
-          <div className="border-b border-zinc-800 p-4 flex items-center justify-between">
-            <div>
-              <div className="font-semibold">Todas as salas</div>
-              <div className="text-sm text-zinc-400">
-                {loading ? "Carregando…" : `${rooms.length} sala(s)`}
-              </div>
-            </div>
-          </div>
-
-          <div className="p-4 space-y-3">
-            {sortedRooms.length === 0 && !loading ? (
-              <div className="text-sm text-zinc-500">
-                Nenhuma sala ainda. Crie a primeira e seja o fundador do
-                império.
-              </div>
-            ) : (
-              sortedRooms.map((r) => {
-                const count = peopleCount(r);
-
-                return (
-                  <div
-                    key={r.id}
-                    className="rounded-2xl border border-zinc-800 p-4 flex items-center justify-between gap-3"
-                  >
-                    <div className="min-w-0">
-                      <div className="font-semibold truncate">{r.name}</div>
-                      <div className="mt-1 text-xs text-zinc-400 flex gap-3">
-                        <span className="font-mono">code: {r.code}</span>
-                        <span>pessoas: {count === null ? "—" : count}</span>
-                      </div>
-                    </div>
-
-                    <button
-                      onClick={() => navigate(`/rooms/${r.code}`)}
-                      className="rounded-xl border border-zinc-700 px-4 py-2 hover:bg-zinc-900"
-                    >
-                      Entrar
-                    </button>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-
-        <div className="text-xs text-zinc-500">
-          Obs: se “pessoas: —” aparecer, é porque o backend ainda não manda a
-          contagem. A gente resolve isso com um patch de 10 linhas.
-        </div>
+        </form>
       </div>
+
+      <section className="mt-10" aria-labelledby="my-rooms">
+        <h2 id="my-rooms" className="text-lg font-bold">
+          Suas salas
+        </h2>
+
+        {rooms.isPending && (
+          <div className="mt-6 flex items-center gap-3 text-fog-300">
+            <Spinner className="h-5 w-5 text-heat-yellow" /> Carregando…
+          </div>
+        )}
+
+        {rooms.isError && (
+          <p role="alert" className="mt-6 bg-ink-850 p-4 text-sm text-heat-orange">
+            {getErrorMessage(rooms.error, "Não consegui carregar suas salas.")}{" "}
+            <button type="button" className="font-bold underline" onClick={() => void rooms.refetch()}>
+              Tentar de novo
+            </button>
+          </p>
+        )}
+
+        {rooms.data && rooms.data.length === 0 && (
+          <p className="mt-6 bg-ink-850 p-6 text-fog-300">
+            Você ainda não está em nenhuma sala privada. Crie a primeira acima. 🔥
+          </p>
+        )}
+
+        <ul className="mt-4 grid gap-4 md:grid-cols-2">
+          {rooms.data?.map((room) => (
+            <li key={room.id} className="flex flex-col gap-4 bg-ink-850 p-5">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h3 className="flex items-center gap-2 truncate text-lg font-bold">
+                    <Lock className="h-4 w-4 shrink-0 text-heat-yellow" aria-hidden />
+                    <span className="truncate">{room.name}</span>
+                  </h3>
+                  <p className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-fog-500">
+                    <span className="font-mono">{room.code}</span>
+                    <span className="flex items-center gap-1">
+                      <Users className="h-3.5 w-3.5" aria-hidden />
+                      {room.participants_count ?? 0}
+                    </span>
+                    {room.is_owner && <span className="font-bold text-heat-pink">Você é admin</span>}
+                  </p>
+                </div>
+
+                <div className="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void copyInvite(room)}
+                    title="Copiar link de convite"
+                    aria-label={`Copiar link de convite de ${room.name}`}
+                    className="p-2 text-fog-300 transition hover:text-fog-100"
+                  >
+                    <Copy className="h-5 w-5" />
+                  </button>
+                  {room.is_owner && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm(`Apagar a sala "${room.name}"? Isso não pode ser desfeito.`)) {
+                          remove.mutate(room);
+                        }
+                      }}
+                      title="Apagar sala"
+                      aria-label={`Apagar sala ${room.name}`}
+                      className="p-2 text-fog-300 transition hover:text-heat-pink"
+                    >
+                      <Trash2 className="h-5 w-5" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <Button size="sm" onClick={() => navigate(`/rooms/${encodeURIComponent(room.code)}`)}>
+                Entrar
+              </Button>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   );
 }
